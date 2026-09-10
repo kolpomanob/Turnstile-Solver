@@ -11,6 +11,8 @@ from quart import Quart, request, jsonify
 from camoufox.async_api import AsyncCamoufox
 from patchright.async_api import async_playwright
 
+AUTH_TOKEN = os.environ.get("SOLVER_AUTH_TOKEN", "")
+
 
 COLORS = {
     'MAGENTA': '\033[35m',
@@ -83,6 +85,7 @@ class TurnstileAPIServer:
 
     def __init__(self, headless: bool, useragent: str, debug: bool, browser_type: str, thread: int, proxy_support: bool):
         self.app = Quart(__name__)
+
         self.debug = debug
         self.results = self._load_results()
         self.browser_type = browser_type
@@ -117,11 +120,16 @@ class TurnstileAPIServer:
             logger.error(f"Error saving results to file: {str(e)}")
 
     def _setup_routes(self) -> None:
-        """Set up the application routes."""
+        """Set up the application routes and optional auth check."""
         self.app.before_serving(self._startup)
         self.app.route('/turnstile', methods=['GET'])(self.process_turnstile)
         self.app.route('/result', methods=['GET'])(self.get_result)
         self.app.route('/')(self.index)
+
+        @self.app.before_request
+        async def _check_auth():
+            if AUTH_TOKEN and request.headers.get("X-Solver-Token") != AUTH_TOKEN:
+                return jsonify({"error": "unauthorized"}), 401
 
     async def _startup(self) -> None:
         """Initialize the browser and page pool on startup."""
@@ -217,7 +225,7 @@ class TurnstileAPIServer:
                     if turnstile_check == "":
                         if self.debug:
                             logger.debug(f"Browser {index}: Attempt {_} - No Turnstile response yet")
-                        
+
                         await page.locator("//div[@class='cf-turnstile']").click(timeout=1000)
                         await asyncio.sleep(0.5)
                     else:
