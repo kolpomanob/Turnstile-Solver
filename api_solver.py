@@ -11,8 +11,15 @@ from quart import Quart, request, jsonify
 from camoufox.async_api import AsyncCamoufox
 from patchright.async_api import async_playwright
 
-_raw_tokens = os.environ.get("SOLVER_AUTH_TOKENS", "")
-AUTH_TOKENS = {t.strip() for t in _raw_tokens.split(",") if t.strip()}
+# Each user gets their own Railway variable prefixed with SOLVER_AUTH_
+# e.g. SOLVER_AUTH_ALICE=abc123, SOLVER_AUTH_BOB=def456
+AUTH_TOKEN_PREFIX = "SOLVER_AUTH_"
+
+AUTH_TOKENS = {
+    value.strip(): key[len(AUTH_TOKEN_PREFIX):].lower()
+    for key, value in os.environ.items()
+    if key.startswith(AUTH_TOKEN_PREFIX) and value.strip()
+}
 
 
 COLORS = {
@@ -129,8 +136,13 @@ class TurnstileAPIServer:
 
         @self.app.before_request
         async def _check_auth():
-            if AUTH_TOKENS and request.headers.get("X-Solver-Token") not in AUTH_TOKENS:
-                return jsonify({"error": "unauthorized"}), 401
+            if AUTH_TOKENS:
+                token = request.headers.get("X-Solver-Token")
+                if token not in AUTH_TOKENS:
+                    return jsonify({"error": "unauthorized"}), 401
+                # Only log /turnstile requests, not every /result poll
+                if request.path == "/turnstile":
+                    logger.info(f"[AUTH] Request from user: {AUTH_TOKENS[token]}")
 
     async def _startup(self) -> None:
         """Initialize the browser and page pool on startup."""
