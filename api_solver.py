@@ -11,7 +11,8 @@ from quart import Quart, request, jsonify
 from camoufox.async_api import AsyncCamoufox
 from patchright.async_api import async_playwright
 
-AUTH_TOKEN = os.environ.get("SOLVER_AUTH_TOKEN", "")
+_raw_tokens = os.environ.get("SOLVER_AUTH_TOKENS", "")
+AUTH_TOKENS = {t.strip() for t in _raw_tokens.split(",") if t.strip()}
 
 
 COLORS = {
@@ -128,7 +129,7 @@ class TurnstileAPIServer:
 
         @self.app.before_request
         async def _check_auth():
-            if AUTH_TOKEN and request.headers.get("X-Solver-Token") != AUTH_TOKEN:
+            if AUTH_TOKENS and request.headers.get("X-Solver-Token") not in AUTH_TOKENS:
                 return jsonify({"error": "unauthorized"}), 401
 
     async def _startup(self) -> None:
