@@ -1,2 +1,3 @@
-protocol://ip:port:username:password
-protocol://ip:port
+http://a43659e56b001289.lsv.as.novada.pro:7777:Jakir1st_u1SFaQ-zone-isp-region-bd-st-dhaka:V8tVZAQxpGBt
+
+
