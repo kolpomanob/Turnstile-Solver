@@ -154,20 +154,16 @@ class TurnstileAPIServer:
 
     async def _initialize_browser(self) -> None:
         """Initialize the browser and create the page pool."""
-
-        
+        playwright = await async_playwright().start()
 
         for _ in range(self.thread_count):
-            if self.browser_type in ['chromium', 'chrome', 'msedge']:
-                browser = await playwright.chromium.launch(
-                    channel=self.browser_type,
-                    headless=self.headless,
-                    args=self.browser_args
-                )
+            browser = await playwright.chromium.launch(
+                channel=self.browser_type,
+                headless=self.headless,
+                args=self.browser_args
+            )
 
-            
-
-            await self.browser_pool.put((_+1, browser))
+            await self.browser_pool.put((_ + 1, browser))
 
             if self.debug:
                 logger.success(f"Browser {_ + 1} initialized successfully")
