@@ -199,24 +199,25 @@ class TurnstileAPIServer:
             }
 
             if proxy:
-                parts = proxy.split(':')
-                if len(parts) == 2 or len(parts) == 3:
+                clean_proxy = proxy.replace("http://", "").replace("https://", "")
+                parts = clean_proxy.split(':')
+                
+                if len(parts) == 4:
+                    # Format: host:port:username:password
+                    p_host, p_port, p_user, p_pass = parts
+                    context_kwargs["proxy"] = {
+                        "server": f"http://{p_host}:{p_port}",
+                        "username": p_user,
+                        "password": p_pass
+                    }
+                elif len(parts) == 2:
+                    # Format: host:port
+                    p_host, p_port = parts
+                    context_kwargs["proxy"] = {
+                        "server": f"http://{p_host}:{p_port}"
+                    }
+                else:
                     context_kwargs["proxy"] = {"server": proxy}
-                elif len(parts) == 4 or len(parts) == 5:
-                    if len(parts) == 5:
-                        proxy_scheme, proxy_ip, proxy_port, proxy_user, proxy_pass = parts
-                        context_kwargs["proxy"] = {
-                            "server": f"{proxy_scheme}://{proxy_ip}:{proxy_port}",
-                            "username": proxy_user,
-                            "password": proxy_pass
-                        }
-                    else:
-                        proxy_ip, proxy_port, proxy_user, proxy_pass = parts
-                        context_kwargs["proxy"] = {
-                            "server": f"http://{proxy_ip}:{proxy_port}",
-                            "username": proxy_user,
-                            "password": proxy_pass
-                        }
 
             context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
@@ -226,6 +227,12 @@ class TurnstileAPIServer:
                 logger.debug(f"Browser {index}: Task {task_id} solving for {url} | Proxy: {proxy}")
 
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+            # Check if Turnstile iframe appears natively
+            try:
+                await page.wait_for_selector("iframe[src*='challenges.cloudflare.com']", timeout=10000)
+            except Exception:
+                pass
 
             # Inject Turnstile API script
             await page.evaluate("""
@@ -252,10 +259,10 @@ class TurnstileAPIServer:
 
             # Polling loop for response
             solved = False
-            for attempt in range(15):
+            for attempt in range(20):
                 try:
                     turnstile_check = await page.input_value("[name=cf-turnstile-response]", timeout=1500)
-                    if turnstile_check:
+                    if turnstile_check and len(turnstile_check) > 20:
                         elapsed_time = round(time.time() - start_time, 3)
                         logger.success(f"Browser {index}: Solved -> {turnstile_check[:12]}... in {elapsed_time}s")
                         self.results[task_id] = {
@@ -267,10 +274,16 @@ class TurnstileAPIServer:
                         solved = True
                         break
                     else:
-                        try:
-                            await page.locator("//div[@class='cf-turnstile']").click(timeout=1000)
-                        except:
-                            pass
+                        # Try clicking directly inside the Turnstile iframe context
+                        for frame in page.frames:
+                            if "challenges.cloudflare.com" in frame.url:
+                                try:
+                                    await frame.click("input[type='checkbox']", timeout=1000)
+                                except Exception:
+                                    try:
+                                        await frame.click("body", timeout=1000)
+                                    except Exception:
+                                        pass
                         await asyncio.sleep(1)
                 except Exception:
                     await asyncio.sleep(0.5)
