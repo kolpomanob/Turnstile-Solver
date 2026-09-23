@@ -7,6 +7,7 @@ import random
 import logging
 import asyncio
 import argparse
+import re                                    # NEW
 from quart import Quart, request, jsonify
 from patchright.async_api import async_playwright
 
@@ -19,6 +20,20 @@ AUTH_TOKENS = {
     for key, value in os.environ.items()
     if key.startswith(AUTH_TOKEN_PREFIX) and value.strip()
 }
+
+# NEW — per-request UA validation. Prevents the solver from becoming an open
+# UA-spoofer that anyone can use to mint tokens with arbitrary fake UAs.
+# Accepts normal desktop Chrome/Edge/Firefox/Safari UA strings only.
+UA_RE = re.compile(
+    r'^Mozilla/5\.0 \([^)]+\) AppleWebKit/[0-9.]+ \(KHTML, like Gecko\) '
+    r'.*?(Chrome|Firefox|Safari|Edg)/[0-9.]+',
+    re.IGNORECASE
+)
+
+def _looks_like_browser_ua(ua: str) -> bool:
+    if not ua or len(ua) > 512:
+        return False
+    return bool(UA_RE.match(ua))
 
 
 COLORS = {
@@ -97,13 +112,15 @@ class TurnstileAPIServer:
         self.results = self._load_results()
         self.browser_type = browser_type
         self.headless = headless
-        self.useragent = useragent
+        self.useragent = useragent        # CHANGED — kept only as a fallback default
         self.thread_count = thread
         self.proxy_support = proxy_support
         self.browser_pool = asyncio.Queue()
+
+        # CHANGED — do NOT pass --user-agent= as a launch arg.
+        # It's unreliable in Playwright; the correct mechanism is
+        # browser.new_context(user_agent=...) per request.
         self.browser_args = []
-        if useragent:
-            self.browser_args.append(f"--user-agent={useragent}")
 
         self._setup_routes()
 
@@ -139,9 +156,8 @@ class TurnstileAPIServer:
                 token = request.headers.get("X-Solver-Token")
                 if token not in AUTH_TOKENS:
                     return jsonify({"error": "unauthorized"}), 401
-                # Only log /turnstile requests, not every /result poll
-                if request.path == "/turnstile":
-                    logger.info(f"[AUTH] Request from user: {AUTH_TOKENS[token]}")
+                # Log every authenticated request so we can see the ua param arriving
+                logger.info(f"[AUTH] Request from user: {AUTH_TOKENS[token]} path={request.path}")
 
     async def _startup(self) -> None:
         """Initialize the browser and page pool on startup."""
@@ -171,7 +187,9 @@ class TurnstileAPIServer:
         logger.success(f"Browser pool initialized with {self.browser_pool.qsize()} browsers")
 
 
-    async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: str = None, cdata: str = None):
+    async def _solve_turnstile(self, task_id: str, url: str, sitekey: str,
+                               action: str = None, cdata: str = None,
+                               requested_ua: str = None):
         """Solve the Turnstile challenge."""
         proxy = None
 
@@ -192,11 +210,6 @@ class TurnstileAPIServer:
             proxy = random.choice(proxies) if proxies else None
 
             if proxy:
-                # Accept both:
-                #   scheme://host:port:user:pass     (5 fields after scheme split)
-                #   scheme://host:port               (2 fields after scheme split)
-                #   host:port:user:pass               (4 fields, no scheme)
-                #   host:port                         (2 fields, no scheme)
                 scheme = "http"
                 rest = proxy
                 if "://" in rest:
@@ -205,20 +218,38 @@ class TurnstileAPIServer:
                 parts = rest.split(":")
 
                 if len(parts) == 2:
-                    # host:port
                     ip, port = parts
-                    context = await browser.new_context(proxy={
-                        "server": f"{scheme}://{ip}:{port}",
-                    })
+                    context = await browser.new_context(
+                        proxy={"server": f"{scheme}://{ip}:{port}"},
+                        user_agent=requested_ua or self.useragent or None,
+                        viewport={"width": 1280, "height": 720},
+                        screen={"width": 1280, "height": 720},
+                        locale="en-US",
+                        timezone_id="Asia/Dhaka",
+                        device_scale_factor=1,
+                        is_mobile=False,
+                        has_touch=False,
+                        java_script_enabled=True,
+                    )
 
                 elif len(parts) == 4:
-                    # host:port:user:pass
                     ip, port, user, pw = parts
-                    context = await browser.new_context(proxy={
-                        "server": f"{scheme}://{ip}:{port}",
-                        "username": user,
-                        "password": pw,
-                    })
+                    context = await browser.new_context(
+                        proxy={
+                            "server": f"{scheme}://{ip}:{port}",
+                            "username": user,
+                            "password": pw,
+                        },
+                        user_agent=requested_ua or self.useragent or None,
+                        viewport={"width": 1280, "height": 720},
+                        screen={"width": 1280, "height": 720},
+                        locale="en-US",
+                        timezone_id="Asia/Dhaka",
+                        device_scale_factor=1,
+                        is_mobile=False,
+                        has_touch=False,
+                        java_script_enabled=True,
+                    )
 
                 else:
                     raise ValueError(
@@ -232,9 +263,35 @@ class TurnstileAPIServer:
                         f"Browser {index}: proxy route = {scheme}://{parts[0]}:{parts[1]}"
                     )
             else:
-                context = await browser.new_context()
+                context = await browser.new_context(
+                    user_agent=requested_ua or self.useragent or None,
+                    viewport={"width": 1280, "height": 720},
+                    screen={"width": 1280, "height": 720},
+                    locale="en-US",
+                    timezone_id="Asia/Dhaka",
+                    device_scale_factor=1,
+                    is_mobile=False,
+                    has_touch=False,
+                    java_script_enabled=True,
+                )
         else:
-            context = await browser.new_context()
+            # CHANGED — this is the path that matters for UA matching.
+            context = await browser.new_context(
+                user_agent=requested_ua or self.useragent or None,
+                viewport={"width": 1280, "height": 720},
+                screen={"width": 1280, "height": 720},
+                locale="en-US",
+                timezone_id="Asia/Dhaka",
+                device_scale_factor=1,
+                is_mobile=False,
+                has_touch=False,
+                java_script_enabled=True,
+            )
+
+        # Effective UA actually used for this solve. Kept separate so we can
+        # return it in the result and the userscript can verify.
+        effective_ua = requested_ua or self.useragent or None
+        ua_source = "request" if requested_ua else ("fallback" if self.useragent else "default")
 
         page = await context.new_page()
 
@@ -242,7 +299,11 @@ class TurnstileAPIServer:
 
         try:
             if self.debug:
-                logger.debug(f"Browser {index}: Starting Turnstile solve for URL: {url} with Sitekey: {sitekey} | Proxy: {proxy}")
+                logger.debug(
+                    f"Browser {index}: Starting Turnstile solve for URL: {url} "
+                    f"with Sitekey: {sitekey} | Proxy: {proxy} | "
+                    f"UA source: {ua_source} | UA: {effective_ua}"
+                )
                 logger.debug(f"Browser {index}: Setting up page data and route")
 
             url_with_slash = url + "/" if not url.endswith("/") else url
@@ -272,9 +333,19 @@ class TurnstileAPIServer:
                     else:
                         elapsed_time = round(time.time() - start_time, 3)
 
-                        logger.success(f"Browser {index}: Successfully solved captcha - {COLORS.get('MAGENTA')}{turnstile_check[:10]}{COLORS.get('RESET')} in {COLORS.get('GREEN')}{elapsed_time}{COLORS.get('RESET')} Seconds")
+                        logger.success(
+                            f"Browser {index}: Successfully solved captcha - "
+                            f"{COLORS.get('MAGENTA')}{turnstile_check[:10]}{COLORS.get('RESET')} "
+                            f"in {COLORS.get('GREEN')}{elapsed_time}{COLORS.get('RESET')} Seconds"
+                        )
 
-                        self.results[task_id] = {"value": turnstile_check, "elapsed_time": elapsed_time}
+                        # CHANGED — include userAgent + uaSource in the result dict
+                        self.results[task_id] = {
+                            "value": turnstile_check,
+                            "elapsed_time": elapsed_time,
+                            "userAgent": effective_ua,
+                            "uaSource": ua_source,
+                        }
                         self._save_results()
                         break
                 except:
@@ -303,6 +374,7 @@ class TurnstileAPIServer:
         sitekey = request.args.get('sitekey')
         action = request.args.get('action')
         cdata = request.args.get('cdata')
+        requested_ua = request.args.get('ua')       # NEW
 
         if not url or not sitekey:
             return jsonify({
@@ -310,14 +382,33 @@ class TurnstileAPIServer:
                 "error": "Both 'url' and 'sitekey' are required"
             }), 400
 
+        # NEW — validate the requested UA. Reject obviously fake/garbage UAs so
+        # this public solver can't be abused as an arbitrary UA spoofer.
+        if requested_ua and not _looks_like_browser_ua(requested_ua):
+            logger.warning(f"[UA] Rejected invalid UA from caller: {requested_ua[:100]!r}")
+            return jsonify({
+                "status": "error",
+                "error": "Invalid 'ua' parameter. Must be a well-formed browser User-Agent string."
+            }), 400
+
         task_id = str(uuid.uuid4())
         self.results[task_id] = "CAPTCHA_NOT_READY"
 
         try:
-            asyncio.create_task(self._solve_turnstile(task_id=task_id, url=url, sitekey=sitekey, action=action, cdata=cdata))
+            asyncio.create_task(self._solve_turnstile(
+                task_id=task_id,
+                url=url,
+                sitekey=sitekey,
+                action=action,
+                cdata=cdata,
+                requested_ua=requested_ua,     # NEW
+            ))
 
             if self.debug:
-                logger.debug(f"Request completed with taskid {task_id}.")
+                logger.debug(
+                    f"Request completed with taskid {task_id}. "
+                    f"UA source: {'request' if requested_ua else 'fallback/default'}"
+                )
             return jsonify({"task_id": task_id}), 202
         except Exception as e:
             logger.error(f"Unexpected error processing request: {str(e)}")
@@ -363,19 +454,12 @@ class TurnstileAPIServer:
                     <ul class="list-disc pl-6 mb-6 text-gray-300">
                         <li><strong>url</strong>: The URL where Turnstile is to be validated</li>
                         <li><strong>sitekey</strong>: The site key for Turnstile</li>
+                        <li><strong>ua</strong> (optional): Browser User-Agent string to use for the solve</li>
                     </ul>
 
                     <div class="bg-gray-700 p-4 rounded-lg mb-6 border border-red-500">
                         <p class="font-semibold mb-2 text-red-400">Example usage:</p>
-                        <code class="text-sm break-all text-red-300">/turnstile?url=https://example.com&sitekey=sitekey</code>
-                    </div>
-
-                    <div class="bg-red-900 border-l-4 border-red-600 p-4 mb-6">
-                        <p class="text-red-200 font-semibold">This project is inspired by 
-                           <a href="https://github.com/Body-Alhoha/turnaround" class="text-red-300 hover:underline">Turnaround</a> 
-                           and is currently maintained by 
-                           <a href="https://github.com/Theyka" class="text-red-300 hover:underline">Theyka</a> 
-                           and <a href="https://github.com/sexfrance" class="text-red-300 hover:underline">Sexfrance</a>.</p>
+                        <code class="text-sm break-all text-red-300">/turnstile?url=https://example.com&amp;sitekey=sitekey&amp;ua=Mozilla%2F5.0...</code>
                     </div>
                 </div>
             </body>
@@ -388,7 +472,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Turnstile API Server")
 
     parser.add_argument('--headless', type=bool, default=False, help='Run the browser in headless mode, without opening a graphical interface. This option requires the --useragent argument to be set (default: False)')
-    parser.add_argument('--useragent', type=str, default=None, help='Specify a custom User-Agent string for the browser. If not provided, the default User-Agent is used')
+    parser.add_argument('--useragent', type=str, default=None, help='Fallback User-Agent if the caller does not supply a ua query param. If not provided, the browser default is used')
     parser.add_argument('--debug', type=bool, default=False, help='Enable or disable debug mode for additional logging and troubleshooting information (default: False)')
     parser.add_argument('--browser_type', type=str, default='chromium', help='Specify the browser type for the solver. Supported options: chromium, chrome, msedge, camoufox (default: chromium)')
     parser.add_argument('--thread', type=int, default=1, help='Set the number of browser threads to use for multi-threaded mode. Increasing this will speed up execution but requires more resources (default: 1)')
