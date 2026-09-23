@@ -180,61 +180,62 @@ class TurnstileAPIServer:
         logger.success(f"Browser pool initialized with {self.browser_pool.qsize()} browsers")
 
     async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: str = None, cdata: str = None):
-        """Solve the Turnstile challenge."""
-        proxy = None
+        """Solve the Turnstile challenge with robust proxy & click handling."""
+        proxy_str = None
         index, browser = await self.browser_pool.get()
+        start_time = time.time()
 
         try:
+            # 1. Load and Select Proxy
             if self.proxy_support:
                 proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
                 if os.path.exists(proxy_file_path):
                     with open(proxy_file_path) as proxy_file:
                         proxies = [line.strip() for line in proxy_file if line.strip()]
-                    proxy = random.choice(proxies) if proxies else None
+                    proxy_str = random.choice(proxies) if proxies else None
 
-            # Setup Context
+            # 2. Configure Context Arguments & Proxy Dict
             context_kwargs = {
                 "user_agent": self.useragent,
-                "viewport": {"width": 1920, "height": 1080}
+                "viewport": {"width": 1920, "height": 1080},
+                "ignore_https_errors": True
             }
 
-            if proxy:
-                clean_proxy = proxy.replace("http://", "").replace("https://", "")
+            if proxy_str:
+                clean_proxy = proxy_str.replace("http://", "").replace("https://", "")
                 parts = clean_proxy.split(':')
-                
+
                 if len(parts) == 4:
-                    # Format: host:port:username:password
                     p_host, p_port, p_user, p_pass = parts
                     context_kwargs["proxy"] = {
                         "server": f"http://{p_host}:{p_port}",
                         "username": p_user,
                         "password": p_pass
                     }
+                    if self.debug:
+                        logger.info(f"Browser {index}: Formatted Auth Proxy -> http://{p_host}:{p_port} | User: {p_user}")
                 elif len(parts) == 2:
-                    # Format: host:port
                     p_host, p_port = parts
                     context_kwargs["proxy"] = {
                         "server": f"http://{p_host}:{p_port}"
                     }
                 else:
-                    context_kwargs["proxy"] = {"server": proxy}
+                    context_kwargs["proxy"] = {"server": proxy_str}
 
             context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
-            start_time = time.time()
 
             if self.debug:
-                logger.debug(f"Browser {index}: Task {task_id} solving for {url} | Proxy: {proxy}")
+                logger.debug(f"Browser {index}: Task {task_id} navigating to {url}")
 
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-            # Check if Turnstile iframe appears natively
+            # 3. Fast Navigation with strict timeout
             try:
-                await page.wait_for_selector("iframe[src*='challenges.cloudflare.com']", timeout=10000)
-            except Exception:
-                pass
+                await page.goto(url, wait_until="commit", timeout=15000)
+            except Exception as nav_err:
+                if self.debug:
+                    logger.warning(f"Browser {index}: Navigation wait timed out/committed early: {nav_err}")
 
-            # Inject Turnstile API script
+            # 4. Inject Turnstile Script
             await page.evaluate("""
                 if (!document.querySelector('script[src*="challenges.cloudflare.com/turnstile"]')) {
                     const script = document.createElement('script');
@@ -244,7 +245,7 @@ class TurnstileAPIServer:
                 }
             """)
 
-            # Inject widget DOM node
+            # 5. Inject Target Widget Element
             action_str = f"div.setAttribute('data-action', '{action}');" if action else ""
             cdata_str = f"div.setAttribute('data-cdata', '{cdata}');" if cdata else ""
             inject_script = f"""
@@ -257,14 +258,18 @@ class TurnstileAPIServer:
             """
             await page.evaluate(inject_script)
 
-            # Polling loop for response
+            if self.debug:
+                logger.debug(f"Browser {index}: Widget injected. Starting frame detection loop.")
+
+            # 6. Extraction Loop
             solved = False
-            for attempt in range(20):
+            for attempt in range(25):
                 try:
-                    turnstile_check = await page.input_value("[name=cf-turnstile-response]", timeout=1500)
+                    # Check if response input holds a token
+                    turnstile_check = await page.input_value("[name=cf-turnstile-response]", timeout=1000)
                     if turnstile_check and len(turnstile_check) > 20:
                         elapsed_time = round(time.time() - start_time, 3)
-                        logger.success(f"Browser {index}: Solved -> {turnstile_check[:12]}... in {elapsed_time}s")
+                        logger.success(f"Browser {index}: Solved Token -> {turnstile_check[:12]}... in {elapsed_time}s")
                         self.results[task_id] = {
                             "value": turnstile_check,
                             "elapsed_time": elapsed_time,
@@ -273,18 +278,16 @@ class TurnstileAPIServer:
                         self._save_results()
                         solved = True
                         break
-                    else:
-                        # Try clicking directly inside the Turnstile iframe context
-                        for frame in page.frames:
-                            if "challenges.cloudflare.com" in frame.url:
-                                try:
-                                    await frame.click("input[type='checkbox']", timeout=1000)
-                                except Exception:
-                                    try:
-                                        await frame.click("body", timeout=1000)
-                                    except Exception:
-                                        pass
-                        await asyncio.sleep(1)
+
+                    # Interact with Turnstile Frame
+                    for frame in page.frames:
+                        if "challenges.cloudflare.com" in frame.url:
+                            try:
+                                await frame.click("body", timeout=800)
+                            except Exception:
+                                pass
+
+                    await asyncio.sleep(1)
                 except Exception:
                     await asyncio.sleep(0.5)
 
@@ -296,7 +299,7 @@ class TurnstileAPIServer:
             await context.close()
 
         except Exception as e:
-            elapsed_time = round(time.time() - start_time, 3) if 'start_time' in locals() else 0
+            elapsed_time = round(time.time() - start_time, 3)
             self.results[task_id] = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
             logger.error(f"Browser {index}: Error during execution: {str(e)}")
 
