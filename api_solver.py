@@ -189,20 +189,57 @@ class TurnstileAPIServer:
         if self.proxy_support:
             proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
 
+            if not os.path.exists(proxy_file_path):
+                raise FileNotFoundError(
+                    f"proxies.txt not found at {proxy_file_path}. "
+                    f"Remove it from .dockerignore and rebuild the image."
+                )
+
             with open(proxy_file_path) as proxy_file:
                 proxies = [line.strip() for line in proxy_file if line.strip()]
 
             proxy = random.choice(proxies) if proxies else None
 
             if proxy:
-                parts = proxy.split(':')
-                if len(parts) == 3:
-                    context = await browser.new_context(proxy={"server": f"{proxy}"})
-                elif len(parts) == 5:
-                    proxy_scheme, proxy_ip, proxy_port, proxy_user, proxy_pass = parts
-                    context = await browser.new_context(proxy={"server": f"{proxy_scheme}://{proxy_ip}:{proxy_port}", "username": proxy_user, "password": proxy_pass})
+                # Accept both:
+                #   scheme://host:port:user:pass     (5 fields after scheme split)
+                #   scheme://host:port               (2 fields after scheme split)
+                #   host:port:user:pass               (4 fields, no scheme)
+                #   host:port                         (2 fields, no scheme)
+                scheme = "http"
+                rest = proxy
+                if "://" in rest:
+                    scheme, rest = rest.split("://", 1)
+
+                parts = rest.split(":")
+
+                if len(parts) == 2:
+                    # host:port
+                    ip, port = parts
+                    context = await browser.new_context(proxy={
+                        "server": f"{scheme}://{ip}:{port}",
+                    })
+
+                elif len(parts) == 4:
+                    # host:port:user:pass
+                    ip, port, user, pw = parts
+                    context = await browser.new_context(proxy={
+                        "server": f"{scheme}://{ip}:{port}",
+                        "username": user,
+                        "password": pw,
+                    })
+
                 else:
-                    raise ValueError("Invalid proxy format")
+                    raise ValueError(
+                        f"Invalid proxy format ({len(parts)} fields): {proxy!r}. "
+                        f"Expected host:port or host:port:user:pass, "
+                        f"optionally prefixed with scheme://"
+                    )
+
+                if self.debug:
+                    logger.debug(
+                        f"Browser {index}: proxy route = {scheme}://{parts[0]}:{parts[1]}"
+                    )
             else:
                 context = await browser.new_context()
         else:
