@@ -11,8 +11,6 @@ from quart import Quart, request, jsonify
 from camoufox.async_api import AsyncCamoufox
 from patchright.async_api import async_playwright
 
-# Each user gets their own Railway variable prefixed with SOLVER_AUTH_
-# e.g. SOLVER_AUTH_ALICE=abc123, SOLVER_AUTH_BOB=def456
 AUTH_TOKEN_PREFIX = "SOLVER_AUTH_"
 
 AUTH_TOKENS = {
@@ -58,37 +56,8 @@ handler = logging.StreamHandler(sys.stdout)
 logger.addHandler(handler)
 
 class TurnstileAPIServer:
-    HTML_TEMPLATE = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Turnstile Solver</title>
-        <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async></script>
-        <script>
-            async function fetchIP() {
-                try {
-                    const response = await fetch('https://api64.ipify.org?format=json');
-                    const data = await response.json();
-                    document.getElementById('ip-display').innerText = `Your IP: ${data.ip}`;
-                } catch (error) {
-                    console.error('Error fetching IP:', error);
-                    document.getElementById('ip-display').innerText = 'Failed to fetch IP';
-                }
-            }
-            window.onload = fetchIP;
-        </script>
-    </head>
-    <body>
-        <p id="ip-display">Fetching your IP...</p>
-    </body>
-    </html>
-    """
-
     def __init__(self, headless: bool, useragent: str, debug: bool, browser_type: str, thread: int, proxy_support: bool):
         self.app = Quart(__name__)
-
         self.debug = debug
         self.results = self._load_results()
         self.browser_type = browser_type
@@ -98,7 +67,6 @@ class TurnstileAPIServer:
         self.proxy_support = proxy_support
         self.browser_pool = asyncio.Queue()
         
-        # Anti-detection launch flags for containerized environments
         self.browser_args = [
             f"--user-agent={self.useragent}",
             "--no-sandbox",
@@ -114,25 +82,22 @@ class TurnstileAPIServer:
 
     @staticmethod
     def _load_results():
-        """Load previous results from results.json."""
         try:
             if os.path.exists("results.json"):
                 with open("results.json", "r") as f:
                     return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.warning(f"Error loading results: {str(e)}. Starting with empty dict.")
+        except Exception as e:
+            logger.warning(f"Error loading results: {str(e)}.")
         return {}
 
     def _save_results(self):
-        """Save results to results.json."""
         try:
             with open("results.json", "w") as result_file:
                 json.dump(self.results, result_file, indent=4)
-        except IOError as e:
+        except Exception as e:
             logger.error(f"Error saving results: {str(e)}")
 
     def _setup_routes(self) -> None:
-        """Set up the application routes and auth check."""
         self.app.before_serving(self._startup)
         self.app.route('/turnstile', methods=['GET'])(self.process_turnstile)
         self.app.route('/result', methods=['GET'])(self.get_result)
@@ -148,7 +113,6 @@ class TurnstileAPIServer:
                     logger.info(f"[AUTH] Request from user: {AUTH_TOKENS[token]}")
 
     async def _startup(self) -> None:
-        """Initialize the browser pool on startup."""
         logger.info("Starting browser initialization")
         try:
             await self._initialize_browser()
@@ -157,7 +121,6 @@ class TurnstileAPIServer:
             raise
 
     async def _initialize_browser(self) -> None:
-        """Initialize the browser instances."""
         if self.browser_type in ['chromium', 'chrome', 'msedge']:
             playwright = await async_playwright().start()
         elif self.browser_type == "camoufox":
@@ -180,13 +143,11 @@ class TurnstileAPIServer:
         logger.success(f"Browser pool initialized with {self.browser_pool.qsize()} browsers")
 
     async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: str = None, cdata: str = None):
-        """Solve the Turnstile challenge with robust proxy & click handling."""
         proxy_str = None
         index, browser = await self.browser_pool.get()
         start_time = time.time()
 
         try:
-            # 1. Load and Select Proxy
             if self.proxy_support:
                 proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
                 if os.path.exists(proxy_file_path):
@@ -194,7 +155,6 @@ class TurnstileAPIServer:
                         proxies = [line.strip() for line in proxy_file if line.strip()]
                     proxy_str = random.choice(proxies) if proxies else None
 
-            # 2. Configure Context Arguments & Proxy Dict
             context_kwargs = {
                 "user_agent": self.useragent,
                 "viewport": {"width": 1920, "height": 1080},
@@ -228,14 +188,17 @@ class TurnstileAPIServer:
             if self.debug:
                 logger.debug(f"Browser {index}: Task {task_id} navigating to {url}")
 
-            # 3. Fast Navigation with strict timeout
+            # Ensure page actually loads DOM before proceeding
             try:
-                await page.goto(url, wait_until="commit", timeout=15000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=25000)
             except Exception as nav_err:
                 if self.debug:
-                    logger.warning(f"Browser {index}: Navigation wait timed out/committed early: {nav_err}")
+                    logger.warning(f"Browser {index}: Page navigation notice: {nav_err}")
 
-            # 4. Inject Turnstile Script
+            # Wait briefly to confirm DOM context is ready
+            await asyncio.sleep(2)
+
+            # Inject Turnstile script
             await page.evaluate("""
                 if (!document.querySelector('script[src*="challenges.cloudflare.com/turnstile"]')) {
                     const script = document.createElement('script');
@@ -245,7 +208,7 @@ class TurnstileAPIServer:
                 }
             """)
 
-            # 5. Inject Target Widget Element
+            # Inject widget node
             action_str = f"div.setAttribute('data-action', '{action}');" if action else ""
             cdata_str = f"div.setAttribute('data-cdata', '{cdata}');" if cdata else ""
             inject_script = f"""
@@ -259,14 +222,13 @@ class TurnstileAPIServer:
             await page.evaluate(inject_script)
 
             if self.debug:
-                logger.debug(f"Browser {index}: Widget injected. Starting frame detection loop.")
+                logger.debug(f"Browser {index}: Widget injected. Starting solve loop.")
 
-            # 6. Extraction Loop
             solved = False
-            for attempt in range(25):
+            for attempt in range(30):
                 try:
-                    # Check if response input holds a token
-                    turnstile_check = await page.input_value("[name=cf-turnstile-response]", timeout=1000)
+                    # Retrieve Turnstile token value
+                    turnstile_check = await page.evaluate("() => { const el = document.querySelector('[name=cf-turnstile-response]'); return el ? el.value : ''; }")
                     if turnstile_check and len(turnstile_check) > 20:
                         elapsed_time = round(time.time() - start_time, 3)
                         logger.success(f"Browser {index}: Solved Token -> {turnstile_check[:12]}... in {elapsed_time}s")
@@ -279,11 +241,11 @@ class TurnstileAPIServer:
                         solved = True
                         break
 
-                    # Interact with Turnstile Frame
+                    # Click Turnstile iframe target if available
                     for frame in page.frames:
                         if "challenges.cloudflare.com" in frame.url:
                             try:
-                                await frame.click("body", timeout=800)
+                                await frame.click("body", timeout=1000)
                             except Exception:
                                 pass
 
@@ -307,7 +269,6 @@ class TurnstileAPIServer:
             await self.browser_pool.put((index, browser))
 
     async def process_turnstile(self):
-        """Handle the /turnstile endpoint requests."""
         url = request.args.get('url')
         sitekey = request.args.get('sitekey')
         action = request.args.get('action')
@@ -332,7 +293,6 @@ class TurnstileAPIServer:
             return jsonify({"status": "error", "error": str(e)}), 500
 
     async def get_result(self):
-        """Return solved token or status."""
         task_id = request.args.get('id')
 
         if not task_id or task_id not in self.results:
@@ -351,31 +311,9 @@ class TurnstileAPIServer:
 
     @staticmethod
     async def index():
-        """Serve API documentation page."""
-        return """
-            <!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Turnstile Solver API</title>
-                <script src="https://cdn.tailwindcss.com"></script>
-            </head>
-            <body class="bg-gray-900 text-gray-200 min-h-screen flex items-center justify-center">
-                <div class="bg-gray-800 p-8 rounded-lg shadow-md max-w-2xl w-full border border-red-500">
-                    <h1 class="text-3xl font-bold mb-6 text-center text-red-500">Welcome to Turnstile Solver API</h1>
-                    <p class="mb-4 text-gray-300">Send a GET request to <code class="bg-red-700 text-white px-2 py-1 rounded">/turnstile</code> with parameters:</p>
-                    <ul class="list-disc pl-6 mb-6 text-gray-300">
-                        <li><strong>url</strong>: Page URL where Turnstile is embedded</li>
-                        <li><strong>sitekey</strong>: Cloudflare site key</li>
-                    </ul>
-                </div>
-            </body>
-            </html>
-        """
+        return "Turnstile Solver API"
 
 def parse_args():
-    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Turnstile API Server")
     parser.add_argument('--headless', type=bool, default=True, help='Run browser headless')
     parser.add_argument('--useragent', type=str, default=None, help='Custom User-Agent')
