@@ -8,7 +8,6 @@ import logging
 import asyncio
 import argparse
 from quart import Quart, request, jsonify
-from camoufox.async_api import AsyncCamoufox
 from patchright.async_api import async_playwright
 
 # Each user gets their own Railway variable prefixed with SOLVER_AUTH_
@@ -156,10 +155,7 @@ class TurnstileAPIServer:
     async def _initialize_browser(self) -> None:
         """Initialize the browser and create the page pool."""
 
-        if self.browser_type in ['chromium', 'chrome', 'msedge']:
-            playwright = await async_playwright().start()
-        elif self.browser_type == "camoufox":
-            camoufox = AsyncCamoufox(headless=self.headless)
+        
 
         for _ in range(self.thread_count):
             if self.browser_type in ['chromium', 'chrome', 'msedge']:
@@ -169,8 +165,7 @@ class TurnstileAPIServer:
                     args=self.browser_args
                 )
 
-            elif self.browser_type == "camoufox":
-                browser = await camoufox.start()
+            
 
             await self.browser_pool.put((_+1, browser))
 
