@@ -4,6 +4,5 @@ __pycache__/
 .git/
 .gitignore
 results.json
-proxies.txt
 README.md
 *.md
