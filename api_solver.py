@@ -246,7 +246,11 @@ class TurnstileAPIServer:
 
                         logger.success(f"Browser {index}: Successfully solved captcha - {COLORS.get('MAGENTA')}{turnstile_check[:10]}{COLORS.get('RESET')} in {COLORS.get('GREEN')}{elapsed_time}{COLORS.get('RESET')} Seconds")
 
-                        self.results[task_id] = {"value": turnstile_check, "elapsed_time": elapsed_time}
+                        self.results[task_id] = {
+    "value": turnstile_check,
+    "elapsed_time": elapsed_time,
+    "userAgent": self.useragent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
                         self._save_results()
                         break
                 except:
