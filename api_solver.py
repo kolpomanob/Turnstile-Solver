@@ -217,17 +217,29 @@ class TurnstileAPIServer:
                 logger.debug(f"Browser {index}: Starting Turnstile solve for URL: {url} with Sitekey: {sitekey} | Proxy: {proxy}")
                 logger.debug(f"Browser {index}: Setting up page data and route")
 
-            url_with_slash = url + "/" if not url.endswith("/") else url
-            turnstile_div = f'<div class="cf-turnstile" style="background: white;" data-sitekey="{sitekey}"' + (f' data-action="{action}"' if action else '') + (f' data-cdata="{cdata}"' if cdata else '') + '></div>'
-            page_data = self.HTML_TEMPLATE.replace("<!-- cf turnstile -->", turnstile_div)
+            # NEW UPDATED CODE
+            await page.goto(url, wait_until="domcontentloaded")
 
-            await page.route(url_with_slash, lambda route: route.fulfill(body=page_data, status=200))
-            await page.goto(url_with_slash)
+            # Inject Turnstile API script into the real site domain context if not present
+            await page.evaluate("""
+                if (!document.querySelector('script[src*="challenges.cloudflare.com/turnstile"]')) {
+                    const script = document.createElement('script');
+                    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+                    script.async = true;
+                    document.head.appendChild(script);
+            }
+                """)
 
-            if self.debug:
-                logger.debug(f"Browser {index}: Setting up Turnstile widget dimensions")
-
-            await page.eval_on_selector("//div[@class='cf-turnstile']", "el => el.style.width = '70px'")
+                # Inject the Turnstile widget into the real target DOM
+            inject_script = f"""
+                const div = document.createElement('div');
+                div.className = 'cf-turnstile';
+                div.setAttribute('data-sitekey', '{sitekey}');
+                {"div.setAttribute('data-action', '" + action + "');" if action else ""}
+                {"div.setAttribute('data-cdata', '" + cdata + "');" if cdata else ""}
+                document.body.appendChild(div);
+                """
+            await page.evaluate(inject_script)
 
             if self.debug:
                 logger.debug(f"Browser {index}: Starting Turnstile response retrieval loop")
