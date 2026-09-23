@@ -4,6 +4,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive
 
+# System dependencies for Chromium AND Firefox/Camoufox
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         fonts-liberation \
@@ -12,8 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libatk1.0-0 \
         libcups2 \
         libdbus-1-3 \
+        libdbus-glib-1-2 \
         libdrm2 \
         libgbm1 \
+        libgdk-pixbuf2.0-0 \
+        libgtk-3-0 \
         libnspr4 \
         libnss3 \
         libxcomposite1 \
@@ -21,22 +25,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxfixes3 \
         libxkbcommon0 \
         libxrandr2 \
+        libxt6 \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# Install Python requirements first for layer caching
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# Fetch Camoufox browser binaries
+# Install Camoufox browser binaries
 RUN python -m camoufox fetch
 
 COPY . .
 
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 
-# Launch solver using camoufox browser type
 CMD python api_solver.py \
       --host 0.0.0.0 \
       --port $PORT \
