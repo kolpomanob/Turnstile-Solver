@@ -23,7 +23,7 @@ HTML_TEMPLATE = """
 def get_token():
     with sync_playwright() as p:
         # Launch visible browser on local machine
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=False, channel="chrome")
         context = browser.new_context()
         page = context.new_page()
 

@@ -313,6 +313,14 @@ class TurnstileAPIServer:
             await page.route(url_with_slash, lambda route: route.fulfill(body=page_data, status=200))
             await page.goto(url_with_slash)
 
+            try:
+                ip_resp = await page.evaluate(
+                    "fetch('https://api.ipify.org?format=json').then(r=>r.json()).then(d=>d.ip)"
+                )
+                logger.info(f"Browser {index}: solving from IP = {ip_resp}")
+            except Exception as e:
+                logger.warning(f"Browser {index}: IP check failed: {e}")
+
             if self.debug:
                 logger.debug(f"Browser {index}: Setting up Turnstile widget dimensions")
 
@@ -467,16 +475,26 @@ class TurnstileAPIServer:
         """
 
 
+def _str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("true", "1", "yes", "y", "on"):
+        return True
+    if v.lower() in ("false", "0", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value, got: {v!r}")
+
+
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Turnstile API Server")
 
-    parser.add_argument('--headless', type=bool, default=False, help='Run the browser in headless mode, without opening a graphical interface. This option requires the --useragent argument to be set (default: False)')
+    parser.add_argument('--headless', type=_str2bool, default=False, help='Run the browser in headless mode, without opening a graphical interface. This option requires the --useragent argument to be set (default: False)')
     parser.add_argument('--useragent', type=str, default=None, help='Fallback User-Agent if the caller does not supply a ua query param. If not provided, the browser default is used')
-    parser.add_argument('--debug', type=bool, default=False, help='Enable or disable debug mode for additional logging and troubleshooting information (default: False)')
+    parser.add_argument('--debug', type=_str2bool, default=False, help='Enable or disable debug mode for additional logging and troubleshooting information (default: False)')
     parser.add_argument('--browser_type', type=str, default='chromium', help='Specify the browser type for the solver. Supported options: chromium, chrome, msedge, camoufox (default: chromium)')
     parser.add_argument('--thread', type=int, default=1, help='Set the number of browser threads to use for multi-threaded mode. Increasing this will speed up execution but requires more resources (default: 1)')
-    parser.add_argument('--proxy', type=bool, default=False, help='Enable proxy support for the solver (Default: False)')
+    parser.add_argument('--proxy', type=_str2bool, default=False, help='Enable proxy support for the solver (Default: False)')
     parser.add_argument('--host', type=str, default='127.0.0.1', help='Specify the IP address where the API solver runs. (Default: 127.0.0.1)')
     parser.add_argument('--port', type=str, default='5000', help='Set the port for the API solver to listen on. (Default: 5000)')
     return parser.parse_args()
