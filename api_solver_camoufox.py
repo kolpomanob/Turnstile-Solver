@@ -60,6 +60,8 @@ logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler(sys.stdout)
 logger.addHandler(handler)
 
+# Fixed: filter unsupported kwargs from camoufox to prevent contrast TypeError (v2)
+
 
 class TurnstileAPIServer:
     HTML_TEMPLATE = """
@@ -229,7 +231,7 @@ class TurnstileAPIServer:
                     context_kwargs = {"proxy": {"server": f"{scheme}://{ip}:{port}"}}
                     # Filter unsupported kwargs from camoufox version bump
                     context_kwargs = {
-                        k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent"}
+                        k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent", "proxy"}
                     }
                     if useragent:
                         context_kwargs["user_agent"] = useragent
