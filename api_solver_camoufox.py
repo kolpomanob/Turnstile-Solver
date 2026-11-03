@@ -84,10 +84,6 @@ logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler(sys.stdout)
 logger.addHandler(handler)
 
-# Patch Camoufox to filter unsupported kwargs before Patchright sees them
-_patch_camoufox()
-
-
 class TurnstileAPIServer:
     HTML_TEMPLATE = """
     <!DOCTYPE html>
