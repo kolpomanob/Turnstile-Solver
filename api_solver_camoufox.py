@@ -125,7 +125,9 @@ class TurnstileAPIServer:
         self.thread_count = thread
         self.proxy_support = proxy_support
         self.browser_pool = asyncio.Queue()
+        self.page_pool = asyncio.Queue()  # Persistent pre-warmed pages
         self.browser_args = []
+        self.target_url = "https://appointment.ivacbd.com/"
         if useragent:
             self.browser_args.append(f"--user-agent={useragent}")
 
@@ -177,37 +179,108 @@ class TurnstileAPIServer:
             raise
 
     async def _initialize_browser(self) -> None:
-        """Initialize the browser and create the page pool."""
+        """Initialize the browser and create persistent pre-warmed pages."""
         if self.browser_type == "camoufox":
-            for _ in range(self.thread_count):
+            for i in range(self.thread_count):
                 browser = await AsyncCamoufox(headless=self.headless).start()
-                await self.browser_pool.put((_ + 1, browser))
+                await self.browser_pool.put((i + 1, browser))
                 if self.debug:
-                    logger.success(f"Camoufox browser {_ + 1} initialized successfully")
+                    logger.success(f"Camoufox browser {i + 1} initialized successfully")
             logger.success(f"Browser pool initialized with {self.browser_pool.qsize()} browsers")
+            # Now create persistent pages for each browser
+            await self._create_page_pool()
             return
 
         playwright = await async_playwright().start()
 
-        for _ in range(self.thread_count):
+        for i in range(self.thread_count):
             browser = await playwright.chromium.launch(
                 channel=self.browser_type,
                 headless=self.headless,
                 args=self.browser_args
             )
 
-            await self.browser_pool.put((_ + 1, browser))
+            await self.browser_pool.put((i + 1, browser))
 
             if self.debug:
-                logger.success(f"Browser {_ + 1} initialized successfully")
+                logger.success(f"Browser {i + 1} initialized successfully")
 
         logger.success(f"Browser pool initialized with {self.browser_pool.qsize()} browsers")
+        # Now create persistent pages for each browser
+        await self._create_page_pool()
+
+
+    async def _create_page_pool(self) -> None:
+        """Create persistent browser contexts with pre-warmed pages at target URL."""
+        proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
+        proxy_list = []
+        if os.path.exists(proxy_file_path):
+            with open(proxy_file_path) as proxy_file:
+                proxy_list = [line.strip() for line in proxy_file if line.strip()]
+
+        for i in range(self.thread_count):
+            _, browser = await self.browser_pool.get()
+            context = None
+            proxy = None
+            page = None
+
+            if self.proxy_support and proxy_list:
+                random.shuffle(proxy_list)
+                for candidate in proxy_list:
+                    try:
+                        scheme = "http"
+                        rest = candidate
+                        if "://" in rest:
+                            scheme, rest = rest.split("://", 1)
+                        parts = rest.split(":")
+                        ctx_kwargs = {}
+                        if len(parts) == 2:
+                            ip, port = parts
+                            ctx_kwargs = {"proxy": {"server": f"{scheme}://{ip}:{port}"}}
+                        elif len(parts) == 4:
+                            ip, port, u, pw = parts
+                            ctx_kwargs = {"proxy": {"server": f"{scheme}://{ip}:{port}", "username": u, "password": pw}}
+                        else:
+                            continue
+                        context = await browser.new_context(**ctx_kwargs)
+                        proxy = candidate
+                        break
+                    except Exception:
+                        continue
+
+            # Fallback: create context without proxy
+            if context is None:
+                context = await browser.new_context()
+
+            page = await context.new_page()
+            try:
+                await page.goto(self.target_url, wait_until="domcontentloaded")
+            except Exception as warmup_err:
+                logger.warning(f"Pre-warm failed for browser {i + 1}: {warmup_err}")
+                await browser.close()
+                # Put browser back so we can try again with a different proxy
+                await self.browser_pool.put((i + 1, browser))
+                continue
+
+            page_title = await page.title()
+            blocked = any(k in page_title.lower() for k in ("cloudflare", "error", "attention"))
+            if blocked:
+                logger.warning(f"Pre-warm returned Cloudflare error for browser {i + 1}: {page_title!r} (proxy={proxy})")
+                await browser.close()
+                await self.browser_pool.put((i + 1, browser))
+                continue
+
+            await self.page_pool.put((i + 1, {"browser": browser, "context": context, "page": page, "proxy": proxy}))
+            logger.success(f"Page pool created: browser {i + 1}, pre-warmed at {self.target_url} via proxy={proxy}")
+
+        # Put back any leftover browsers from this loop that weren't consumed
+        while not self.browser_pool.empty():
+            await self.browser_pool.put(await self.browser_pool.get())
+        logger.success(f"Page pool initialized with {self.page_pool.qsize()} pages")
 
 
     async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: str = None, cdata: str = None, useragent: str = None):
-        """Solve the Turnstile challenge."""
-        proxy = None
-
+        """Solve the Turnstile challenge using a pre-warmed persistent page."""
         # Camoufox manages its own fingerprint (Firefox engine + native UA).
         # Forcing a Chrome UA onto it creates an inconsistent fingerprint
         # (Chrome UA string on a Firefox/Gecko stack) that Cloudflare flags,
@@ -217,112 +290,33 @@ class TurnstileAPIServer:
         if self.browser_type == "camoufox":
             useragent = None
 
-        index, browser = await self.browser_pool.get()
-
-        if self.proxy_support:
-            proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
-
-            if not os.path.exists(proxy_file_path):
-                raise FileNotFoundError(
-                    f"proxies.txt not found at {proxy_file_path}. "
-                    f"Remove it from .dockerignore and rebuild the image."
-                )
-
-            with open(proxy_file_path) as proxy_file:
-                proxies = [line.strip() for line in proxy_file if line.strip()]
-
-            context = None
-            proxy = None
-            random.shuffle(proxies)
-
-            for candidate_proxy in proxies:
-                try:
-                    scheme = "http"
-                    rest = candidate_proxy
-                    if "://" in rest:
-                        scheme, rest = rest.split("://", 1)
-
-                    parts = rest.split(":")
-
-                    if len(parts) == 2:
-                        ip, port = parts
-                        context_kwargs = {"proxy": {"server": f"{scheme}://{ip}:{port}"}}
-                        context_kwargs = {
-                            k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent", "proxy"}
-                        }
-                        if useragent:
-                            context_kwargs["user_agent"] = useragent
-                        context = await browser.new_context(**context_kwargs)
-                        proxy = candidate_proxy
-                        break
-
-                    elif len(parts) == 4:
-                        ip, port, user, pw = parts
-                        context_kwargs = {
-                            "proxy": {
-                                "server": f"{scheme}://{ip}:{port}",
-                                "username": user,
-                                "password": pw,
-                            }
-                        }
-                        context_kwargs = {
-                            k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent", "proxy"}
-                        }
-                        if useragent:
-                            context_kwargs["user_agent"] = useragent
-                        context = await browser.new_context(**context_kwargs)
-                        proxy = candidate_proxy
-                        break
-                except Exception as proxy_err:
-                    logger.warning(f"Failed to initialize proxy {candidate_proxy}: {proxy_err}")
-                    continue
-
-            if not context:
-                context_kwargs = {}
-                if useragent:
-                    context_kwargs["user_agent"] = useragent
-                context = await browser.new_context(**context_kwargs)
-        else:
-            # Same filtering needed even without proxy_support
-            context_kwargs = {}
-            if useragent:
-                context_kwargs["user_agent"] = useragent
-            # Filter unsupported kwargs from camoufox (e.g. contrast)
-            context_kwargs = {
-                k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent"}
-            }
-            context = await browser.new_context(**context_kwargs)
-
-        page = await context.new_page()
+        # Get a pre-warmed page from the pool
+        index, page_data = await self.page_pool.get()
+        browser = page_data["browser"]
+        context = page_data["context"]
+        page = page_data["page"]
+        current_proxy = page_data.get("proxy")
 
         start_time = time.time()
 
         try:
             if self.debug:
-                logger.debug(f"Browser {index}: Starting Turnstile solve for URL: {url} with Sitekey: {sitekey} | Proxy: {proxy}")
-                logger.debug(f"Browser {index}: Navigating to real site and injecting widget")
+                logger.debug(f"Browser {index}: Starting Turnstile solve for URL: {url} with Sitekey: {sitekey}")
 
             # Show proxy usage at INFO level for verification
-            if proxy:
-                logger.info(f"Browser {index}: Using proxy {proxy}")
+            if current_proxy:
+                logger.info(f"Browser {index}: Using pre-warmed page via proxy {current_proxy}")
             else:
-                logger.info(f"Browser {index}: Using direct connection (no proxy)")
+                logger.info(f"Browser {index}: Using pre-warmed page (no proxy)")
 
-            # Navigate to the REAL site instead of serving a stub page.
-            # Cloudflare's challenge detects stub pages (missing real assets/cookies)
-            # and issues lower-confidence tokens that IVAC rejects.
-            url_with_slash = url + "/" if not url.endswith("/") else url
-            response = await page.goto(url_with_slash)
-            page_title = await page.title()
-            current_url = page.url
-            logger.info(f"Browser {index}: Navigated to {url_with_slash} -> Final URL: {current_url} | Status: {response.status if response else 'None'} | Title: {page_title!r}")
+            # Page is already at target URL, just reset the Turnstile widget
+            # Remove existing widget if any
+            await page.evaluate("""
+                const oldWidgets = document.querySelectorAll('.cf-turnstile');
+                oldWidgets.forEach(w => w.remove());
+            """)
 
-            # If page shows a Cloudflare error (title containing "Cloudflare", "Error", "Attention"), abort early
-            page_lower = page_title.lower()
-            if "cloudflare" in page_lower or "error" in page_lower or "attention" in page_lower:
-                raise Exception(f"Cloudflare blocked page with proxy {proxy}. Page title: {page_title}")
-
-            # Inject the Turnstile widget into the real page
+            # Inject the Turnstile widget into the pre-warmed page
             turnstile_div = f'<div class="cf-turnstile" style="background: white; position: fixed; top: 10px; left: 10px; z-index: 999999;" data-sitekey="{sitekey}"' + (f' data-action="{action}"' if action else '') + (f' data-cdata="{cdata}"' if cdata else '') + '></div>'
 
             # Load Turnstile API script if not already present
@@ -343,7 +337,7 @@ class TurnstileAPIServer:
             """)
 
             # Wait for Turnstile to initialize
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
 
             if self.debug:
                 logger.debug(f"Browser {index}: Widget injected, waiting for Turnstile to render")
@@ -353,6 +347,17 @@ class TurnstileAPIServer:
 
             for attempt in range(10):
                 try:
+                    # Check for Cloudflare block page (proxy IP got banned mid-session)
+                    page_title = await page.title()
+                    if any(k in page_title.lower() for k in ("cloudflare", "error", "attention")):
+                        logger.warning(f"Browser {index}: Page hit Cloudflare block (proxy={current_proxy}), title={page_title!r}")
+                        # Recycle this page with a fresh proxy
+                        await self._recycle_page_with_new_proxy(index, page_data)
+                        elapsed_time = round(time.time() - start_time, 3)
+                        self.results[task_id] = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
+                        logger.error(f"Browser {index}: Recycled page due to Cloudflare block in {elapsed_time}s")
+                        return
+
                     turnstile_check = await page.input_value("[name=cf-turnstile-response]", timeout=2000)
                     if turnstile_check == "":
                         logger.info(f"Browser {index}: Attempt {attempt} - No Turnstile response yet")
@@ -363,7 +368,7 @@ class TurnstileAPIServer:
                             logger.warning(f"Browser {index}: No Turnstile widget found on page!")
                         else:
                             await page.locator("//div[@class='cf-turnstile']").click(timeout=1000)
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.3)
                     else:
                         elapsed_time = round(time.time() - start_time, 3)
 
@@ -393,10 +398,88 @@ class TurnstileAPIServer:
             logger.error(f"Browser {index}: Error solving Turnstile: {str(e)}")
         finally:
             if self.debug:
-                logger.debug(f"Browser {index}: Clearing page state")
+                logger.debug(f"Browser {index}: Returning page to pool")
 
+            # Return the page to the pool for reuse
+            await self.page_pool.put((index, page_data))
+
+    async def _recycle_page_with_new_proxy(self, index: int, page_data: dict):
+        """Close current context/page and create a fresh one with a new proxy."""
+        browser = page_data["browser"]
+        context = page_data["context"]
+        old_proxy = page_data.get("proxy")
+
+        # Close old context
+        try:
             await context.close()
-            await self.browser_pool.put((index, browser))
+        except Exception:
+            pass
+
+        # Load proxy list
+        proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
+        proxy_list = []
+        if os.path.exists(proxy_file_path):
+            with open(proxy_file_path) as proxy_file:
+                proxy_list = [line.strip() for line in proxy_file if line.strip()]
+
+        if not proxy_list:
+            logger.error(f"Browser {index}: No proxies available for recycle, re-adding original page")
+            await self.page_pool.put((index, page_data))
+            return
+
+        random.shuffle(proxy_list)
+        new_context = None
+        new_proxy = None
+
+        for candidate in proxy_list:
+            if candidate == old_proxy:
+                continue  # Skip the blocked proxy
+            try:
+                scheme = "http"
+                rest = candidate
+                if "://" in rest:
+                    scheme, rest = rest.split("://", 1)
+                parts = rest.split(":")
+                ctx_kwargs = {}
+                if len(parts) == 2:
+                    ip, port = parts
+                    ctx_kwargs = {"proxy": {"server": f"{scheme}://{ip}:{port}"}}
+                elif len(parts) == 4:
+                    ip, port, u, pw = parts
+                    ctx_kwargs = {"proxy": {"server": f"{scheme}://{ip}:{port}", "username": u, "password": pw}}
+                else:
+                    continue
+                new_context = await browser.new_context(**ctx_kwargs)
+                new_proxy = candidate
+                break
+            except Exception:
+                continue
+
+        if new_context is None:
+            # Fallback to no proxy
+            new_context = await browser.new_context()
+            new_proxy = None
+
+        new_page = await new_context.new_page()
+        try:
+            await new_page.goto(self.target_url, wait_until="domcontentloaded")
+        except Exception as e:
+            logger.error(f"Browser {index}: Recycle navigation failed: {e}")
+            await new_context.close()
+            await self.page_pool.put((index, page_data))
+            return
+
+        page_title = await new_page.title()
+        blocked = any(k in page_title.lower() for k in ("cloudflare", "error", "attention"))
+        if blocked:
+            logger.warning(f"Browser {index}: Recycled page via proxy {new_proxy} still blocked: {page_title!r}")
+            await new_context.close()
+            await self.page_pool.put((index, page_data))
+            return
+
+        new_page_data = {"browser": browser, "context": new_context, "page": new_page, "proxy": new_proxy}
+        await self.page_pool.put((index, new_page_data))
+        logger.success(f"Browser {index}: Page recycled with new proxy={new_proxy}")
 
     async def process_turnstile(self):
         """Handle the /turnstile endpoint requests."""
