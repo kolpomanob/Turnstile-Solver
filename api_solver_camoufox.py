@@ -305,6 +305,8 @@ class TurnstileAPIServer:
             # Show proxy usage at INFO level for verification
             if proxy:
                 logger.info(f"Browser {index}: Using proxy {proxy}")
+            else:
+                logger.info(f"Browser {index}: Using direct connection (no proxy)")
 
             # Navigate to the REAL site instead of serving a stub page.
             # Cloudflare's challenge detects stub pages (missing real assets/cookies)
@@ -483,18 +485,24 @@ class TurnstileAPIServer:
         """
 
 
+def _str_to_bool(val):
+    if isinstance(val, bool):
+        return val
+    return str(val).lower() in ("true", "1", "t", "yes", "y")
+
+
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Turnstile API Server")
 
-    parser.add_argument('--headless', type=bool, default=False, help='Run the browser in headless mode, without opening a graphical interface. This option requires the --useragent argument to be set (default: False)')
-    parser.add_argument('--useragent', type=str, default=None, help='Specify a custom User-Agent string for the browser. If not provided, the default User-Agent is used')
-    parser.add_argument('--debug', type=bool, default=False, help='Enable or disable debug mode for additional logging and troubleshooting information (default: False)')
-    parser.add_argument('--browser_type', type=str, default='chromium', help='Specify the browser type for the solver. Supported options: chromium, chrome, msedge, camoufox (default: chromium)')
-    parser.add_argument('--thread', type=int, default=1, help='Set the number of browser threads to use for multi-threaded mode. Increasing this will speed up execution but requires more resources (default: 1)')
-    parser.add_argument('--proxy', type=bool, default=False, help='Enable proxy support for the solver (Default: False)')
-    parser.add_argument('--host', type=str, default='127.0.0.1', help='Specify the IP address where the API solver runs. (Default: 127.0.0.1)')
-    parser.add_argument('--port', type=str, default='5000', help='Set the port for the API solver to listen on. (Default: 5000)')
+    parser.add_argument('--headless', type=_str_to_bool, default=False, help='Run the browser in headless mode')
+    parser.add_argument('--useragent', type=str, default=None, help='Specify a custom User-Agent string')
+    parser.add_argument('--debug', type=_str_to_bool, default=False, help='Enable or disable debug mode')
+    parser.add_argument('--browser_type', type=str, default='chromium', help='Browser type (chromium, chrome, msedge, camoufox)')
+    parser.add_argument('--thread', type=int, default=1, help='Number of browser threads')
+    parser.add_argument('--proxy', type=_str_to_bool, default=False, help='Enable proxy support')
+    parser.add_argument('--host', type=str, default='127.0.0.1', help='Host IP address')
+    parser.add_argument('--port', type=str, default='5000', help='Port number')
     return parser.parse_args()
 
 
