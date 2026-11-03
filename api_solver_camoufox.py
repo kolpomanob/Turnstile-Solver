@@ -231,63 +231,53 @@ class TurnstileAPIServer:
             with open(proxy_file_path) as proxy_file:
                 proxies = [line.strip() for line in proxy_file if line.strip()]
 
-            proxy = random.choice(proxies) if proxies else None
+            context = None
+            proxy = None
+            random.shuffle(proxies)
 
-            if proxy:
-                # Accept both:
-                #   scheme://host:port:user:pass     (5 fields after scheme split)
-                #   scheme://host:port               (2 fields after scheme split)
-                #   host:port:user:pass               (4 fields, no scheme)
-                #   host:port                         (2 fields, no scheme)
-                scheme = "http"
-                rest = proxy
-                if "://" in rest:
-                    scheme, rest = rest.split("://", 1)
+            for candidate_proxy in proxies:
+                try:
+                    scheme = "http"
+                    rest = candidate_proxy
+                    if "://" in rest:
+                        scheme, rest = rest.split("://", 1)
 
-                parts = rest.split(":")
+                    parts = rest.split(":")
 
-                if len(parts) == 2:
-                    # host:port
-                    ip, port = parts
-                    context_kwargs = {"proxy": {"server": f"{scheme}://{ip}:{port}"}}
-                    # Filter unsupported kwargs from camoufox version bump
-                    context_kwargs = {
-                        k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent", "proxy"}
-                    }
-                    if useragent:
-                        context_kwargs["user_agent"] = useragent
-                    context = await browser.new_context(**context_kwargs)
-
-                elif len(parts) == 4:
-                    # host:port:user:pass
-                    ip, port, user, pw = parts
-                    context_kwargs = {
-                        "proxy": {
-                            "server": f"{scheme}://{ip}:{port}",
-                            "username": user,
-                            "password": pw,
+                    if len(parts) == 2:
+                        ip, port = parts
+                        context_kwargs = {"proxy": {"server": f"{scheme}://{ip}:{port}"}}
+                        context_kwargs = {
+                            k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent", "proxy"}
                         }
-                    }
-                    # Filter unsupported kwargs (e.g. contrast from newer camoufox)
-                    context_kwargs = {
-                        k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent", "proxy"}
-                    }
-                    if useragent:
-                        context_kwargs["user_agent"] = useragent
-                    context = await browser.new_context(**context_kwargs)
+                        if useragent:
+                            context_kwargs["user_agent"] = useragent
+                        context = await browser.new_context(**context_kwargs)
+                        proxy = candidate_proxy
+                        break
 
-                else:
-                    raise ValueError(
-                        f"Invalid proxy format ({len(parts)} fields): {proxy!r}. "
-                        f"Expected host:port or host:port:user:pass, "
-                        f"optionally prefixed with scheme://"
-                    )
+                    elif len(parts) == 4:
+                        ip, port, user, pw = parts
+                        context_kwargs = {
+                            "proxy": {
+                                "server": f"{scheme}://{ip}:{port}",
+                                "username": user,
+                                "password": pw,
+                            }
+                        }
+                        context_kwargs = {
+                            k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent", "proxy"}
+                        }
+                        if useragent:
+                            context_kwargs["user_agent"] = useragent
+                        context = await browser.new_context(**context_kwargs)
+                        proxy = candidate_proxy
+                        break
+                except Exception as proxy_err:
+                    logger.warning(f"Failed to initialize proxy {candidate_proxy}: {proxy_err}")
+                    continue
 
-                if self.debug:
-                    logger.debug(
-                        f"Browser {index}: proxy route = {scheme}://{parts[0]}:{parts[1]}"
-                    )
-            else:
+            if not context:
                 context_kwargs = {}
                 if useragent:
                     context_kwargs["user_agent"] = useragent
@@ -320,7 +310,15 @@ class TurnstileAPIServer:
             # Cloudflare's challenge detects stub pages (missing real assets/cookies)
             # and issues lower-confidence tokens that IVAC rejects.
             url_with_slash = url + "/" if not url.endswith("/") else url
-            await page.goto(url_with_slash)
+            response = await page.goto(url_with_slash)
+            page_title = await page.title()
+            current_url = page.url
+            logger.info(f"Browser {index}: Navigated to {url_with_slash} -> Final URL: {current_url} | Status: {response.status if response else 'None'} | Title: {page_title!r}")
+
+            # If page shows a Cloudflare error (title containing "Cloudflare", "Error", "Attention"), abort early
+            page_lower = page_title.lower()
+            if "cloudflare" in page_lower or "error" in page_lower or "attention" in page_lower:
+                raise Exception(f"Cloudflare blocked page with proxy {proxy}. Page title: {page_title}")
 
             # Inject the Turnstile widget into the real page
             turnstile_div = f'<div class="cf-turnstile" style="background: white; position: fixed; top: 10px; left: 10px; z-index: 999999;" data-sitekey="{sitekey}"' + (f' data-action="{action}"' if action else '') + (f' data-cdata="{cdata}"' if cdata else '') + '></div>'
