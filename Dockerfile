@@ -32,6 +32,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+# Pre-fetch Camoufox browser binary during build to avoid GitHub rate limit on Railway
+RUN python -m camoufox fetch
+
 # Install the Chromium browser binary that patchright manages
 RUN python -m patchright install --with-deps chromium
 
