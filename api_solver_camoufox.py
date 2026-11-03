@@ -227,6 +227,10 @@ class TurnstileAPIServer:
                     # host:port
                     ip, port = parts
                     context_kwargs = {"proxy": {"server": f"{scheme}://{ip}:{port}"}}
+                    # Filter unsupported kwargs from camoufox version bump
+                    context_kwargs = {
+                        k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent"}
+                    }
                     if useragent:
                         context_kwargs["user_agent"] = useragent
                     context = await browser.new_context(**context_kwargs)
@@ -240,6 +244,10 @@ class TurnstileAPIServer:
                             "username": user,
                             "password": pw,
                         }
+                    }
+                    # Filter unsupported kwargs (e.g. contrast from newer camoufox)
+                    context_kwargs = {
+                        k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent", "proxy"}
                     }
                     if useragent:
                         context_kwargs["user_agent"] = useragent
@@ -257,9 +265,13 @@ class TurnstileAPIServer:
                         f"Browser {index}: proxy route = {scheme}://{parts[0]}:{parts[1]}"
                     )
             else:
-                context_kwargs = {}
-                if useragent:
-                    context_kwargs["user_agent"] = useragent
+                # Filter out any kwargs that browser.new_context() doesn't support.
+                # Newer camoufox versions pass 'contrast' in context_options which
+                # Patchright 1.49 doesn't accept, causing TypeError.
+                allowed_keys = {"no_viewport", "user_agent"}
+                context_kwargs = {
+                    k: v for k, v in context_kwargs.items() if k in allowed_keys
+                }
                 context = await browser.new_context(**context_kwargs)
         else:
             context_kwargs = {}
