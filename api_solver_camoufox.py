@@ -11,6 +11,30 @@ from quart import Quart, request, jsonify
 from patchright.async_api import async_playwright
 from camoufox.async_api import AsyncCamoufox
 
+# --- Monkey-patch Browser.new_context to strip kwargs Patchright 1.49 rejects ---
+# Newer Camoufox versions inject fingerprint options (e.g. 'contrast') that
+# Patchright 1.49's Browser.new_context() doesn't accept, causing
+# TypeError: Browser.new_context() got an unexpected keyword argument 'contrast'.
+# This patch removes them at the source so any caller (Camoufox, Playwright,
+# or our own code) is safe.
+def _strip_unsupported_kwargs(original_method):
+    async def _wrapper(self, *args, **kwargs):
+        for bad in ("contrast",):
+            kwargs.pop(bad, None)
+        return await original_method(self, *args, **kwargs)
+    return _wrapper
+
+
+for _module_name in ("patchright._impl._browser", "playwright._impl._browser"):
+    try:
+        _mod = __import__(_module_name, fromlist=["Browser"])
+        _cls = getattr(_mod, "Browser", None)
+        if _cls is not None and hasattr(_cls, "new_context"):
+            _cls.new_context = _strip_unsupported_kwargs(_cls.new_context)
+    except Exception:
+        pass
+# --------------------------------------------------------------------------------
+
 # Each user gets their own Railway variable prefixed with SOLVER_AUTH_
 # e.g. SOLVER_AUTH_ALICE=abc123, SOLVER_AUTH_BOB=def456
 AUTH_TOKEN_PREFIX = "SOLVER_AUTH_"
@@ -60,7 +84,8 @@ logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler(sys.stdout)
 logger.addHandler(handler)
 
-# Fixed: filter unsupported kwargs from camoufox to prevent contrast TypeError (v2)
+# Patch Camoufox to filter unsupported kwargs before Patchright sees them
+_patch_camoufox()
 
 
 class TurnstileAPIServer:
