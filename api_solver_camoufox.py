@@ -7,6 +7,7 @@ import random
 import logging
 import asyncio
 import argparse
+import re
 from quart import Quart, request, jsonify
 from patchright.async_api import async_playwright
 from camoufox.async_api import AsyncCamoufox
@@ -84,6 +85,17 @@ logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler(sys.stdout)
 logger.addHandler(handler)
 
+MOCK_HTML_STUB = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IVAC Bangladesh</title>
+</head>
+<body style="background: #ffffff; margin: 0; padding: 20px;">
+</body>
+</html>"""
+
 class TurnstileAPIServer:
     HTML_TEMPLATE = """
     <!DOCTYPE html>
@@ -132,6 +144,22 @@ class TurnstileAPIServer:
             self.browser_args.append(f"--user-agent={useragent}")
 
         self._setup_routes()
+
+    async def _setup_route_interception(self, context) -> None:
+        """Intercept requests to appointment.ivacbd.com and fulfill with local HTML stub."""
+        async def _handle_route(route):
+            req_url = route.request.url
+            # Let Cloudflare challenge requests through — we only intercept the origin
+            if "challenges.cloudflare.com" in req_url or "cloudflare.com" in req_url:
+                await route.continue_()
+            else:
+                await route.fulfill(
+                    status=200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    body=MOCK_HTML_STUB
+                )
+
+        await context.route(re.compile(r"appointment\.ivacbd\.com"), _handle_route)
 
     @staticmethod
     def _load_results():
@@ -252,6 +280,9 @@ class TurnstileAPIServer:
             if context is None:
                 context = await browser.new_context()
 
+            # Set up route interception for Option B (local HTML stub)
+            await self._setup_route_interception(context)
+
             page = await context.new_page()
             try:
                 await page.goto(self.target_url, wait_until="domcontentloaded")
@@ -310,14 +341,11 @@ class TurnstileAPIServer:
                 logger.info(f"Browser {index}: Using pre-warmed page (no proxy)")
 
             # Page is already at target URL, just reset the Turnstile widget
-            # Remove existing widget if any
+            # Remove existing widget if any and clean up old iframes
             await page.evaluate("""
-                const oldWidgets = document.querySelectorAll('.cf-turnstile');
+                const oldWidgets = document.querySelectorAll('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
                 oldWidgets.forEach(w => w.remove());
             """)
-
-            # Inject the Turnstile widget into the pre-warmed page
-            turnstile_div = f'<div class="cf-turnstile" style="background: white; position: fixed; top: 10px; left: 10px; z-index: 999999;" data-sitekey="{sitekey}"' + (f' data-action="{action}"' if action else '') + (f' data-cdata="{cdata}"' if cdata else '') + '></div>'
 
             # Load Turnstile API script if not already present
             await page.evaluate("""
@@ -329,11 +357,18 @@ class TurnstileAPIServer:
                 }
             """)
 
-            # Inject widget into page
+            # Inject widget into page and trigger render if api.js is already loaded
+            turnstile_div = f'<div id="cf-turnstile-container" class="cf-turnstile" style="background: white; position: fixed; top: 10px; left: 10px; z-index: 999999;" data-sitekey="{sitekey}"' + (f' data-action="{action}"' if action else '') + (f' data-cdata="{cdata}"' if cdata else '') + '></div>'
             await page.evaluate(f"""
-                const widget = document.createElement('div');
-                widget.innerHTML = `{turnstile_div}`;
-                document.body.appendChild(widget.firstChild);
+                const wrapper = document.createElement('div');
+                wrapper.innerHTML = `{turnstile_div}`;
+                const el = wrapper.firstChild;
+                document.body.appendChild(el);
+                if (window.turnstile && typeof window.turnstile.render === 'function') {{
+                    try {{
+                        window.turnstile.render(el);
+                    }} catch (e) {{}}
+                }}
             """)
 
             # Wait for Turnstile to initialize
@@ -459,6 +494,9 @@ class TurnstileAPIServer:
             # Fallback to no proxy
             new_context = await browser.new_context()
             new_proxy = None
+
+        # Set up route interception for Option B (local HTML stub)
+        await self._setup_route_interception(new_context)
 
         new_page = await new_context.new_page()
         try:
