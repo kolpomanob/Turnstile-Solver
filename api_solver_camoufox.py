@@ -355,14 +355,18 @@ class TurnstileAPIServer:
             if self.debug:
                 logger.debug(f"Browser {index}: Starting Turnstile response retrieval loop")
 
-            for _ in range(10):
+            for attempt in range(10):
                 try:
                     turnstile_check = await page.input_value("[name=cf-turnstile-response]", timeout=2000)
                     if turnstile_check == "":
-                        if self.debug:
-                            logger.debug(f"Browser {index}: Attempt {_} - No Turnstile response yet")
+                        logger.info(f"Browser {index}: Attempt {attempt} - No Turnstile response yet")
 
-                        await page.locator("//div[@class='cf-turnstile']").click(timeout=1000)
+                        # Check if widget exists
+                        widget_count = await page.locator("//div[@class='cf-turnstile']").count()
+                        if widget_count == 0:
+                            logger.warning(f"Browser {index}: No Turnstile widget found on page!")
+                        else:
+                            await page.locator("//div[@class='cf-turnstile']").click(timeout=1000)
                         await asyncio.sleep(0.5)
                     else:
                         elapsed_time = round(time.time() - start_time, 3)
@@ -380,8 +384,8 @@ class TurnstileAPIServer:
                         self.results[task_id] = {"value": turnstile_check, "elapsed_time": elapsed_time, "userAgent": reported_ua}
                         self._save_results()
                         break
-                except:
-                    pass
+                except Exception as loop_err:
+                    logger.warning(f"Browser {index}: Attempt {attempt} error: {loop_err}")
 
             if self.results.get(task_id) == "CAPTCHA_NOT_READY":
                 elapsed_time = round(time.time() - start_time, 3)
