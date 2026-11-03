@@ -43,10 +43,10 @@ ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 
 # --thread 1 to start (see "Memory" section below), bump later
 # --headless True REQUIRES --useragent per the solver's CLI rules
-CMD python api_solver.py \
+CMD python api_solver_camoufox.py \
       --host 0.0.0.0 \
       --port $PORT \
+      --browser_type camoufox \
       --thread 1 \
       --headless True \
-      --proxy True \
-      --useragent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      --proxy False

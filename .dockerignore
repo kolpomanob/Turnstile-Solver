@@ -4,5 +4,5 @@ __pycache__/
 .git/
 .gitignore
 results.json
-README.md
 *.md
+*.bak
