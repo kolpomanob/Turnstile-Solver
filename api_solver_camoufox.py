@@ -316,6 +316,10 @@ class TurnstileAPIServer:
                 logger.debug(f"Browser {index}: Starting Turnstile solve for URL: {url} with Sitekey: {sitekey} | Proxy: {proxy}")
                 logger.debug(f"Browser {index}: Navigating to real site and injecting widget")
 
+            # Show proxy usage at INFO level for verification
+            if proxy:
+                logger.info(f"Browser {index}: Using proxy {proxy}")
+
             # Navigate to the REAL site instead of serving a stub page.
             # Cloudflare's challenge detects stub pages (missing real assets/cookies)
             # and issues lower-confidence tokens that IVAC rejects.
