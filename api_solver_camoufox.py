@@ -340,7 +340,10 @@ class TurnstileAPIServer:
             else:
                 logger.info(f"Browser {index}: Using pre-warmed page (no proxy)")
 
-            # Page is already at target URL, just reset the Turnstile widget
+            # Fresh local navigation per solve (instant via route interception)
+            # Ensures Turnstile initializes on a clean document lifecycle
+            await page.goto(self.target_url, wait_until="domcontentloaded")
+
             # Remove existing widget if any and clean up old iframes
             await page.evaluate("""
                 const oldWidgets = document.querySelectorAll('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
