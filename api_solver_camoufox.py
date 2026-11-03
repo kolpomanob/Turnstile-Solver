@@ -276,9 +276,14 @@ class TurnstileAPIServer:
                 }
                 context = await browser.new_context(**context_kwargs)
         else:
+            # Same filtering needed even without proxy_support
             context_kwargs = {}
             if useragent:
                 context_kwargs["user_agent"] = useragent
+            # Filter unsupported kwargs from camoufox (e.g. contrast)
+            context_kwargs = {
+                k: v for k, v in context_kwargs.items() if k in {"no_viewport", "user_agent"}
+            }
             context = await browser.new_context(**context_kwargs)
 
         page = await context.new_page()
