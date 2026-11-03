@@ -60,4 +60,4 @@ CMD python api_solver_camoufox.py \
       --browser_type camoufox \
       --thread 1 \
       --headless True \
-      --proxy True
+      --proxy false
