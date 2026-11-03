@@ -14,15 +14,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libatk1.0-0 \
         libcups2 \
         libdbus-1-3 \
+        libdbus-glib-1-2 \
         libdrm2 \
         libgbm1 \
+        libglib2.0-0 \
+        libgtk-3-0 \
         libnspr4 \
         libnss3 \
+        libpango-1.0-0 \
+        libx11-6 \
+        libx11-xcb1 \
+        libxcb1 \
         libxcomposite1 \
         libxdamage1 \
         libxfixes3 \
         libxkbcommon0 \
         libxrandr2 \
+        libxtst6 \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
