@@ -58,6 +58,6 @@ CMD python api_solver_camoufox.py \
       --host 0.0.0.0 \
       --port $PORT \
       --browser_type camoufox \
-      --thread 6 \
+      --thread 3 \
       --headless True \
       --proxy True
