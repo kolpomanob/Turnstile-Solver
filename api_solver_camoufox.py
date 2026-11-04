@@ -429,7 +429,9 @@ class TurnstileAPIServer:
             if self.results.get(task_id) == "CAPTCHA_NOT_READY":
                 elapsed_time = round(time.time() - start_time, 3)
                 self.results[task_id] = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
-                logger.error(f"Browser {index}: Turnstile timed out after 10 attempts in {COLORS.get('RED')}{elapsed_time}{COLORS.get('RESET')} Seconds")
+                logger.error(f"Browser {index}: Turnstile timed out after 10 attempts in {COLORS.get('RED')}{elapsed_time}{COLORS.get('RESET')} Seconds — recycling proxy")
+                await self._recycle_page_with_new_proxy(index, page_data)
+                return
         except Exception as e:
             elapsed_time = round(time.time() - start_time, 3)
             self.results[task_id] = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
