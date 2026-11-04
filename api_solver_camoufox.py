@@ -329,6 +329,7 @@ class TurnstileAPIServer:
         current_proxy = page_data.get("proxy")
 
         start_time = time.time()
+        recycled = False
 
         try:
             if self.debug:
@@ -390,6 +391,7 @@ class TurnstileAPIServer:
                     if any(k in page_title.lower() for k in ("cloudflare", "error", "attention")):
                         logger.warning(f"Browser {index}: Page hit Cloudflare block (proxy={current_proxy}), title={page_title!r}")
                         # Recycle this page with a fresh proxy
+                        recycled = True
                         await self._recycle_page_with_new_proxy(index, page_data)
                         elapsed_time = round(time.time() - start_time, 3)
                         self.results[task_id] = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
@@ -430,6 +432,7 @@ class TurnstileAPIServer:
                 elapsed_time = round(time.time() - start_time, 3)
                 self.results[task_id] = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
                 logger.error(f"Browser {index}: Turnstile timed out after 10 attempts in {COLORS.get('RED')}{elapsed_time}{COLORS.get('RESET')} Seconds — recycling proxy")
+                recycled = True
                 await self._recycle_page_with_new_proxy(index, page_data)
                 return
         except Exception as e:
@@ -437,23 +440,23 @@ class TurnstileAPIServer:
             self.results[task_id] = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
             logger.error(f"Browser {index}: Error solving Turnstile: {str(e)}")
         finally:
-            if self.debug:
-                logger.debug(f"Browser {index}: Returning page to pool")
-
-            # Return the page to the pool for reuse
-            await self.page_pool.put((index, page_data))
+            if not recycled:
+                if self.debug:
+                    logger.debug(f"Browser {index}: Returning page to pool")
+                await self.page_pool.put((index, page_data))
 
     async def _recycle_page_with_new_proxy(self, index: int, page_data: dict):
         """Close current context/page and create a fresh one with a new proxy."""
         browser = page_data["browser"]
-        context = page_data["context"]
+        old_context = page_data.get("context")
         old_proxy = page_data.get("proxy")
 
         # Close old context
-        try:
-            await context.close()
-        except Exception:
-            pass
+        if old_context:
+            try:
+                await old_context.close()
+            except Exception:
+                pass
 
         # Load proxy list
         proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
@@ -462,14 +465,10 @@ class TurnstileAPIServer:
             with open(proxy_file_path) as proxy_file:
                 proxy_list = [line.strip() for line in proxy_file if line.strip()]
 
-        if not proxy_list:
-            logger.error(f"Browser {index}: No proxies available for recycle, re-adding original page")
-            await self.page_pool.put((index, page_data))
-            return
-
         random.shuffle(proxy_list)
         new_context = None
         new_proxy = None
+        new_page = None
 
         for candidate in proxy_list:
             if candidate == old_proxy:
@@ -490,35 +489,32 @@ class TurnstileAPIServer:
                 else:
                     continue
                 new_context = await browser.new_context(**ctx_kwargs)
+                await self._setup_route_interception(new_context)
+                new_page = await new_context.new_page()
+                await new_page.goto(self.target_url, wait_until="domcontentloaded")
                 new_proxy = candidate
                 break
             except Exception:
+                if new_context:
+                    try:
+                        await new_context.close()
+                    except Exception:
+                        pass
+                new_context = None
+                new_page = None
                 continue
 
-        if new_context is None:
-            # Fallback to no proxy
-            new_context = await browser.new_context()
-            new_proxy = None
-
-        # Set up route interception for Option B (local HTML stub)
-        await self._setup_route_interception(new_context)
-
-        new_page = await new_context.new_page()
-        try:
-            await new_page.goto(self.target_url, wait_until="domcontentloaded")
-        except Exception as e:
-            logger.error(f"Browser {index}: Recycle navigation failed: {e}")
-            await new_context.close()
-            await self.page_pool.put((index, page_data))
-            return
-
-        page_title = await new_page.title()
-        blocked = any(k in page_title.lower() for k in ("cloudflare", "error", "attention"))
-        if blocked:
-            logger.warning(f"Browser {index}: Recycled page via proxy {new_proxy} still blocked: {page_title!r}")
-            await new_context.close()
-            await self.page_pool.put((index, page_data))
-            return
+        if new_context is None or new_page is None:
+            # Fallback to fresh context without proxy
+            try:
+                new_context = await browser.new_context()
+                await self._setup_route_interception(new_context)
+                new_page = await new_context.new_page()
+                await new_page.goto(self.target_url, wait_until="domcontentloaded")
+                new_proxy = None
+            except Exception as fb_err:
+                logger.error(f"Browser {index}: Fallback recycle failed: {fb_err}")
+                return
 
         new_page_data = {"browser": browser, "context": new_context, "page": new_page, "proxy": new_proxy}
         await self.page_pool.put((index, new_page_data))
